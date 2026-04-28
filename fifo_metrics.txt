@@ -1,0 +1,6 @@
+--- FIFO EXPERIMENT METRICS ---
+Total Tasks Completed: 1000
+Makespan (Total Runtime): 39.67s
+Average CPU Usage: 87.90%
+Average Active Workers: 5.03 out of 8
+Total Monitor Ticks (10ms intervals): 3927
