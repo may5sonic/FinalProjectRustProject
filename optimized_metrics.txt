@@ -1,8 +1,8 @@
 --- EXPERIMENT METRICS ---
 Policy: Optimized
 Total Tasks Completed: 1000
-Makespan (Total Runtime): 40.25s
-Average Wait Time: 4.10s
-Average Turnaround Time: 4.30s
-Average CPU Usage: 73.73%
+Makespan (Total Runtime): 40.24s
+Average Wait Time: 4.09s
+Average Turnaround Time: 4.29s
+Average CPU Usage: 73.74%
 Average Active Workers: 4.97 out of 8
