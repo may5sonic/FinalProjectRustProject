@@ -26,6 +26,15 @@ impl TaskKind {
     }
 }
 
+// Add this right below your imports and above the TaskKind enum
+#[derive(Debug, Clone)]
+pub struct SimulationConfig {
+    pub total_tasks: u32,
+    pub io_probability: f64,
+    pub use_optimized_scheduler: bool,
+    pub output_filename: &'static str,
+}
+
 // The core task structure
 #[derive(Debug, Clone)]
 pub struct Task {
@@ -33,6 +42,8 @@ pub struct Task {
     pub kind: TaskKind,
     pub arrival_time: Duration,
     pub duration: Duration, // Will always be 200ms based on amendments
+    pub started_at: Option<Instant>,
+    pub completed_at: Option<Instant>,
 }
 
 //Task Generator
@@ -55,6 +66,8 @@ pub fn generate_tasks(total_tasks: u32, io_probability: f64) -> Vec<Task> {
             arrival_time: Duration::from_millis((i * 20) as u64),
             // Both CPU and IO tasks take 200ms according to the amendments
             duration: Duration::from_millis(200),
+            started_at: None,
+            completed_at: None,
         });
     }
     tasks
@@ -82,11 +95,11 @@ impl SystemState {
     }
 }
 
-fn main() {
+fn run_simulation(config: SimulationConfig) {
     println!("Concurrent Task Dispatcher initialized.");
 
     // Generate and Sort Tasks
-    let mut generated_tasks = generate_tasks(1000, 0.70);
+    let mut generated_tasks = generate_tasks(config.total_tasks, config.io_probability);
     // Sort task by arrival time just in case
     generated_tasks.sort_by_key(|t| t.arrival_time);
 
@@ -115,17 +128,21 @@ fn main() {
     let (tx, rx) = mpsc::channel::<Task>();
     let shared_rx = Arc::new(Mutex::new(rx));
 
+    // Channel for workers to send completed tasks back
+    let (done_tx, done_rx) = mpsc::channel::<Task>();
+
     // Spawn exactly 8 worker threads
     let mut worker_handles = vec![];
 
     for _ in 0..8 {
         let rx_clone = Arc::clone(&shared_rx);
         let state_clone = Arc::clone(&shared_state);
+        let done_tx_clone = done_tx.clone();
 
         let handle = thread::spawn(move || {
             loop {
                 // Safely grab the next task from the channel
-                let task = {
+                let mut task = {
                     let lock = rx_clone.lock().unwrap();
                     match lock.recv() {
                         Ok(t) => t,
@@ -133,13 +150,20 @@ fn main() {
                     }
                 };
 
+                // Stamp start time, execute, then stamp completion time
                 // Simulate executing the task
+                task.started_at = Some(Instant::now());
                 thread::sleep(task.duration);
+                task.completed_at = Some(Instant::now());
 
                 // Task is done! Release the resources back to the global state
                 let mut state = state_clone.lock().unwrap();
                 state.active_workers -= 1;
                 state.current_cpu_usage -= task.kind.cpu_cost();
+                drop(state);
+
+                // Send the finished task to the collector
+                done_tx_clone.send(task).unwrap();
             }
         });
         worker_handles.push(handle);
@@ -177,26 +201,53 @@ fn main() {
         (cpu_records, worker_records)
     });
 
-    // The Manager Dispatcher Loop (FIFO)
+    // The Manager Dispatcher Loop (FIFO & Optimized)
     println!("Manager starting dispatch loop...");
-
-    // Start the timer for the "makespan" (total runtime) metric
     let start_time = Instant::now();
-    let total_tasks = manager_queue.len();
 
-    while let Some(task) = manager_queue.pop_front() {
-        loop {
-            let mut state = shared_state.lock().unwrap();
+    while !manager_queue.is_empty() {
+        let mut state = shared_state.lock().unwrap();
+        let now = start_time.elapsed();
 
-            if state.can_dispatch(&task) {
+        if config.use_optimized_scheduler {
+            // OPTIMIZED: Find the first task in line that has arrived AND fits the resources
+            let mut found_index = None;
+            for (i, task) in manager_queue.iter().enumerate() {
+                if task.arrival_time > now {
+                    break; // Hasn't arrived yet
+                }
+                if state.can_dispatch(task) {
+                    found_index = Some(i);
+                    break;
+                }
+            }
+
+            if let Some(index) = found_index {
+                let task = manager_queue.remove(index).unwrap();
                 state.active_workers += 1;
                 state.current_cpu_usage += task.kind.cpu_cost();
-
                 tx.send(task).unwrap();
-                break;
             } else {
                 drop(state);
                 thread::sleep(Duration::from_millis(5));
+            }
+        } else {
+            // FIFO: Only look at the front of the queue
+            if let Some(task) = manager_queue.front() {
+                if task.arrival_time <= now {
+                    if state.can_dispatch(task) {
+                        let task = manager_queue.pop_front().unwrap();
+                        state.active_workers += 1;
+                        state.current_cpu_usage += task.kind.cpu_cost();
+                        tx.send(task).unwrap();
+                    } else {
+                        drop(state);
+                        thread::sleep(Duration::from_millis(5)); // Resources full
+                    }
+                } else {
+                    drop(state);
+                    thread::sleep(Duration::from_millis(5)); // Task hasn't arrived
+                }
             }
         }
     }
@@ -204,6 +255,7 @@ fn main() {
     // --- CLEAN SHUTDOWN & METRICS EXPORT ---
     //Drop the sender so workers know to stop once they finish their current tasks
     drop(tx);
+    drop(done_tx); // Drop the main thread's copy of the done sender
 
     // Wait for workers to finish all dispatched tasks
         for handle in worker_handles {
@@ -212,24 +264,66 @@ fn main() {
 
     // Stop the timer now that all work is actually done
     let makespan = start_time.elapsed();
-    println!("Manager finished dispatching and workers completed all tasks.");
+    //println!("Manager finished dispatching and workers completed all tasks.");
 
     // Tell the monitor to stop and collect its data
     simulation_running.store(false, Ordering::Relaxed);
     let (cpu_history, worker_history) = monitor_handle.join().unwrap();
 
+    // Tally up the wait and turnaround times
+    let mut total_wait_time = Duration::ZERO;
+    let mut total_turnaround_time = Duration::ZERO;
+    let mut completed_count: u32 = 0;
+
+    // Pull all finished tasks out of the collector channel
+    for task in done_rx {
+        completed_count += 1;
+        let logical_arrival = start_time + task.arrival_time;
+        
+        if let (Some(started), Some(completed)) = (task.started_at, task.completed_at) {
+            total_wait_time += started.duration_since(logical_arrival);
+            total_turnaround_time += completed.duration_since(logical_arrival);
+        }
+    }
+
     // Calculate the averages requested by the amendments
+    let avg_wait = total_wait_time / completed_count;
+    let avg_turnaround = total_turnaround_time / completed_count;
     let avg_cpu: f64 = cpu_history.iter().copied().map(|x| x as f64).sum::<f64>() / cpu_history.len() as f64;
     let avg_workers: f64 = worker_history.iter().copied().map(|x| x as f64).sum::<f64>() / worker_history.len() as f64;
 
     // Write the experiment output to a text file for the GitHub repo
-    let mut file = File::create("fifo_metrics.txt").expect("Unable to create metrics file");
-    writeln!(file, "--- FIFO EXPERIMENT METRICS ---").unwrap();
-    writeln!(file, "Total Tasks Completed: {}", total_tasks).unwrap();
+    let mut file = File::create(config.output_filename).expect("Unable to create metrics file");
+    writeln!(file, "--- EXPERIMENT METRICS ---").unwrap();
+    writeln!(file, "Policy: {}", if config.use_optimized_scheduler { "Optimized" } else { "FIFO" }).unwrap();
+    writeln!(file, "Total Tasks Completed: {}", completed_count).unwrap();
     writeln!(file, "Makespan (Total Runtime): {:.2?}", makespan).unwrap();
+    writeln!(file, "Average Wait Time: {:.2?}", avg_wait).unwrap();
+    writeln!(file, "Average Turnaround Time: {:.2?}", avg_turnaround).unwrap();
     writeln!(file, "Average CPU Usage: {:.2}%", avg_cpu).unwrap();
     writeln!(file, "Average Active Workers: {:.2} out of 8", avg_workers).unwrap();
-    writeln!(file, "Total Monitor Ticks (10ms intervals): {}", cpu_history.len()).unwrap();
 
     println!("Simulation complete. Metrics successfully written to 'fifo_metrics.txt'.");
+}
+
+fn main() {
+    // Experiment A: Strict FIFO Workload
+    let fifo_config = SimulationConfig {
+        total_tasks: 1000,
+        io_probability: 0.70, // 700 IO / 300 CPU
+        use_optimized_scheduler: false,
+        output_filename: "fifo_metrics.txt",
+    };
+    run_simulation(fifo_config);
+
+    // Experiment B: Stressed Workload using Optimized Search
+    let optimized_config = SimulationConfig {
+        total_tasks: 1000,
+        io_probability: 0.80, // 800 IO / 200 CPU
+        use_optimized_scheduler: true,
+        output_filename: "optimized_metrics.txt",
+    };
+    run_simulation(optimized_config);
+    
+    println!("Both experiments completed successfully!");
 }
