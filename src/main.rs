@@ -292,7 +292,7 @@ fn run_simulation(config: SimulationConfig) {
     let avg_cpu: f64 = cpu_history.iter().copied().map(|x| x as f64).sum::<f64>() / cpu_history.len() as f64;
     let avg_workers: f64 = worker_history.iter().copied().map(|x| x as f64).sum::<f64>() / worker_history.len() as f64;
 
-    // Write the experiment output to a text file for the GitHub repo
+// Write the experiment output to a text file for the GitHub repo
     let mut file = File::create(config.output_filename).expect("Unable to create metrics file");
     writeln!(file, "--- EXPERIMENT METRICS ---").unwrap();
     writeln!(file, "Policy: {}", if config.use_optimized_scheduler { "Optimized" } else { "FIFO" }).unwrap();
@@ -303,7 +303,7 @@ fn run_simulation(config: SimulationConfig) {
     writeln!(file, "Average CPU Usage: {:.2}%", avg_cpu).unwrap();
     writeln!(file, "Average Active Workers: {:.2} out of 8", avg_workers).unwrap();
 
-    println!("Simulation complete. Metrics successfully written to 'fifo_metrics.txt'.");
+    println!("Simulation complete. Metrics successfully written to '{}'.", config.output_filename);
 }
 
 fn main() {

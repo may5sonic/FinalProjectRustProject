@@ -1,7 +1,8 @@
---- FIFO EXPERIMENT METRICS ---
+--- EXPERIMENT METRICS ---
+Policy: FIFO
 Total Tasks Completed: 1000
-Makespan (Total Runtime): 39.65s
-Average Wait Time: 9.49s
-Average Turnaround Time: 9.69s
-Average CPU Usage: 88.21%
+Makespan (Total Runtime): 39.63s
+Average Wait Time: 9.48s
+Average Turnaround Time: 9.68s
+Average CPU Usage: 88.27%
 Average Active Workers: 5.05 out of 8
